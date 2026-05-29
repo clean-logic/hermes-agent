@@ -242,6 +242,13 @@ If the callback server cannot start (port in use, bind failure), each `send_*` m
 
 Button clicks are gated by `MATTERMOST_ALLOWED_USERS` (same list that gates normal bot access). Set `*` to allow all authorized clickers. A double-click guard prevents the same prompt from resolving twice.
 
+**Bind-host security:** The default bind of `127.0.0.1` means the callback server is only reachable from the same machine — no external traffic can reach it. If you change `MATTERMOST_CALLBACK_HOST` to `0.0.0.0` (cross-host deployments), the endpoint is accessible from the network. In that configuration, the only protections are:
+
+- Each prompt uses a per-click unguessable random token (`action_id`) embedded in the button URL — guessing or replaying it is not feasible.
+- `MATTERMOST_ALLOWED_USERS` gates the click, but note that the `user_id` field is **self-reported in the POST body**; Mattermost integration buttons do not sign their payloads by default.
+
+For cross-host deployments, place the callback server behind a reverse proxy or firewall so only your Mattermost instance can reach port `18065`.
+
 ## Reply Mode
 
 The `MATTERMOST_REPLY_MODE` setting controls how Hermes posts responses:

@@ -51,11 +51,11 @@ class TestButtonFormat:
         adapter._callback_url = "http://external:9999/hermes-callback"
         assert adapter._effective_callback_url() == "http://external:9999/hermes-callback"
 
-    def test_register_and_pop_action(self):
+    def test_pop_action_double_click_guard(self):
         adapter = _make_adapter()
-        action_id = adapter._register_action({"kind": "approval", "session_key": "s1"})
-        assert adapter._pop_action(action_id) == {"kind": "approval", "session_key": "s1"}
-        assert adapter._pop_action(action_id) is None
+        adapter._pending_actions["tok1"] = {"kind": "approval", "session_key": "s1"}
+        assert adapter._pop_action("tok1") == {"kind": "approval", "session_key": "s1"}
+        assert adapter._pop_action("tok1") is None
 
 
 class TestFallbackWhenButtonsDisabled:
@@ -159,22 +159,48 @@ class TestPostFailure:
         adapter._api_post = AsyncMock(return_value={})
         result = await adapter.send_exec_approval("ch1", "cmd", "s1")
         assert result.success is False
+        # Pending entry must NOT be stored when the post failed.
         assert adapter._pending_actions == {}
+
+
+class TestPendingActionsCap:
+    @pytest.mark.asyncio
+    async def test_evicts_oldest_when_cap_reached(self):
+        adapter = _make_adapter()
+        adapter._api_post = AsyncMock(return_value={"id": "p1"})
+        # Fill to the cap with synthetic entries.
+        for i in range(adapter._MAX_PENDING):
+            adapter._pending_actions[f"old{i}"] = {"kind": "update"}
+        assert len(adapter._pending_actions) == adapter._MAX_PENDING
+        await adapter.send_update_prompt("ch1", "Proceed?")
+        # Cap must not be exceeded.
+        assert len(adapter._pending_actions) <= adapter._MAX_PENDING
+        # The oldest synthetic entry must have been evicted.
+        assert "old0" not in adapter._pending_actions
+
+
+class TestClarifyChoiceCap:
+    @pytest.mark.asyncio
+    async def test_choices_capped_at_ten(self):
+        adapter = _make_adapter()
+        adapter._api_post = AsyncMock(return_value={"id": "p1"})
+        many_choices = [f"Option {i}" for i in range(25)]
+        await adapter.send_clarify("ch1", "Pick one", many_choices, "cl1", "s1")
+        stored = next(iter(adapter._pending_actions.values()))
+        assert len(stored["choices"]) == 10
 
 
 class TestApprovalResolution:
     @pytest.mark.asyncio
     async def test_handle_callback_resolves_approval(self):
         adapter = _make_adapter()
-        action_id = adapter._register_action({
-            "kind": "approval", "session_key": "session1",
-        })
+        adapter._pending_actions["tok1"] = {"kind": "approval", "session_key": "session1"}
         adapter._lookup_username = AsyncMock(return_value="alice")
 
         with patch("tools.approval.resolve_gateway_approval") as mock_resolve:
             resp = await adapter._handle_callback(_make_request({
                 "user_id": "u1",
-                "context": {"action_id": action_id, "choice": "once"},
+                "context": {"action_id": "tok1", "choice": "once"},
             }))
 
         mock_resolve.assert_called_once_with("session1", "once", resolve_all=False)
@@ -185,19 +211,17 @@ class TestApprovalResolution:
     @pytest.mark.asyncio
     async def test_double_click_guard(self):
         adapter = _make_adapter()
-        action_id = adapter._register_action({
-            "kind": "approval", "session_key": "session1",
-        })
+        adapter._pending_actions["tok2"] = {"kind": "approval", "session_key": "session1"}
         adapter._lookup_username = AsyncMock(return_value="alice")
 
         with patch("tools.approval.resolve_gateway_approval"):
             await adapter._handle_callback(_make_request({
                 "user_id": "u1",
-                "context": {"action_id": action_id, "choice": "once"},
+                "context": {"action_id": "tok2", "choice": "once"},
             }))
             resp2 = await adapter._handle_callback(_make_request({
                 "user_id": "u1",
-                "context": {"action_id": action_id, "choice": "once"},
+                "context": {"action_id": "tok2", "choice": "once"},
             }))
 
         body2 = json.loads(resp2.text)
@@ -209,38 +233,36 @@ class TestAuth:
     async def test_unauthorized_click_returns_403(self, monkeypatch):
         monkeypatch.setenv("MATTERMOST_ALLOWED_USERS", "alice")
         adapter = _make_adapter()
-        action_id = adapter._register_action({
-            "kind": "approval", "session_key": "session1",
-        })
+        adapter._pending_actions["tok3"] = {"kind": "approval", "session_key": "session1"}
 
         with patch("tools.approval.resolve_gateway_approval") as mock_resolve:
             resp = await adapter._handle_callback(_make_request({
                 "user_id": "bob",
-                "context": {"action_id": action_id, "choice": "once"},
+                "context": {"action_id": "tok3", "choice": "once"},
             }))
 
         assert resp.status == 403
         mock_resolve.assert_not_called()
-        assert action_id in adapter._pending_actions
+        assert "tok3" in adapter._pending_actions
 
 
 class TestSlashConfirm:
     @pytest.mark.asyncio
     async def test_handle_callback_resolves_slash(self):
         adapter = _make_adapter()
-        action_id = adapter._register_action({
+        adapter._pending_actions["tok4"] = {
             "kind": "slash",
             "session_key": "session1",
             "confirm_id": "confirm1",
             "channel_id": "ch1",
-        })
+        }
         adapter._api_post = AsyncMock()
 
         with patch("tools.slash_confirm.resolve", new_callable=AsyncMock) as mock_resolve:
             mock_resolve.return_value = None
             await adapter._handle_callback(_make_request({
                 "user_id": "u1",
-                "context": {"action_id": action_id, "choice": "always"},
+                "context": {"action_id": "tok4", "choice": "always"},
             }))
 
         mock_resolve.assert_awaited_once_with("session1", "confirm1", "always")
@@ -248,37 +270,33 @@ class TestSlashConfirm:
 
 class TestUpdatePrompt:
     @pytest.mark.asyncio
-    async def test_handle_callback_writes_update_response(self):
+    async def test_handle_callback_writes_update_response(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         adapter = _make_adapter()
-        action_id = adapter._register_action({"kind": "update"})
-
-        from hermes_constants import get_hermes_home
-        path = get_hermes_home() / ".update_response"
-        if path.exists():
-            path.unlink()
+        adapter._pending_actions["tok5"] = {"kind": "update"}
 
         await adapter._handle_callback(_make_request({
             "user_id": "u1",
-            "context": {"action_id": action_id, "choice": "y"},
+            "context": {"action_id": "tok5", "choice": "y"},
         }))
 
-        assert path.read_text() == "y"
+        assert (tmp_path / ".update_response").read_text() == "y"
 
 
 class TestClarify:
     @pytest.mark.asyncio
     async def test_handle_callback_resolves_choice(self):
         adapter = _make_adapter()
-        action_id = adapter._register_action({
+        adapter._pending_actions["tok6"] = {
             "kind": "clarify",
             "clarify_id": "cl1",
             "choices": ["Alpha", "Beta"],
-        })
+        }
 
         with patch("tools.clarify_gateway.resolve_gateway_clarify") as mock_resolve:
             await adapter._handle_callback(_make_request({
                 "user_id": "u1",
-                "context": {"action_id": action_id, "choice_index": 1},
+                "context": {"action_id": "tok6", "choice_index": 1},
             }))
 
         mock_resolve.assert_called_once_with("cl1", "Beta")
@@ -286,16 +304,16 @@ class TestClarify:
     @pytest.mark.asyncio
     async def test_handle_callback_other_marks_awaiting_text(self):
         adapter = _make_adapter()
-        action_id = adapter._register_action({
+        adapter._pending_actions["tok7"] = {
             "kind": "clarify",
             "clarify_id": "cl1",
             "choices": ["Alpha"],
-        })
+        }
 
         with patch("tools.clarify_gateway.mark_awaiting_text") as mock_mark:
             await adapter._handle_callback(_make_request({
                 "user_id": "u1",
-                "context": {"action_id": action_id, "choice_index": -1},
+                "context": {"action_id": "tok7", "choice_index": -1},
             }))
 
         mock_mark.assert_called_once_with("cl1")
