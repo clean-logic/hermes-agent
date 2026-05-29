@@ -228,6 +228,23 @@ class TestApprovalResolution:
         assert "already been resolved" in body2["ephemeral_text"]
 
 
+    @pytest.mark.asyncio
+    async def test_transient_failure_reinserts_for_retry(self):
+        adapter = _make_adapter()
+        adapter._pending_actions["tok_err"] = {"kind": "approval", "session_key": "session1"}
+        adapter._lookup_username = AsyncMock(return_value="alice")
+
+        with patch("tools.approval.resolve_gateway_approval", side_effect=RuntimeError("transient")):
+            resp = await adapter._handle_callback(_make_request({
+                "user_id": "u1",
+                "context": {"action_id": "tok_err", "choice": "once"},
+            }))
+
+        assert resp.status == 500
+        # Entry must be re-registered so the user can retry.
+        assert "tok_err" in adapter._pending_actions
+
+
 class TestAuth:
     @pytest.mark.asyncio
     async def test_unauthorized_click_returns_403(self, monkeypatch):

@@ -733,6 +733,8 @@ class MattermostAdapter(BasePlatformAdapter):
         ``_pending_actions`` only after the post is confirmed live, so a failed
         post cannot leave a dangling registry entry.
         """
+        if not self._buttons_enabled():
+            return SendResult(success=False, error="Mattermost callback server not running")
         payload = {
             "channel_id": chat_id,
             "message": message,
@@ -812,6 +814,11 @@ class MattermostAdapter(BasePlatformAdapter):
                 "Mattermost: callback resolution failed (kind=%s): %s",
                 kind, exc, exc_info=True,
             )
+            # Re-register so the user can retry after a transient failure.
+            # The pop above already prevents true double-resolution: a concurrent
+            # click during the await window returns "already resolved", and only
+            # this exception path re-inserts, so the guard stays intact.
+            self._pending_actions[action_id] = payload
             return web.json_response(
                 {"ephemeral_text": "Hermes could not process this action."},
                 status=500,
@@ -900,8 +907,6 @@ class MattermostAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Render a Mattermost interactive-message exec approval prompt."""
-        if not self._buttons_enabled():
-            return SendResult(success=False, error="Mattermost callback server not running")
         action_id = secrets.token_urlsafe(16)
         cmd_preview = command[:3800] + "..." if len(command) > 3800 else command
         actions = [
@@ -928,8 +933,6 @@ class MattermostAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Render a Mattermost slash-command confirmation prompt."""
-        if not self._buttons_enabled():
-            return SendResult(success=False, error="Mattermost callback server not running")
         action_id = secrets.token_urlsafe(16)
         body = message if len(message) <= 3800 else message[:3800] + "..."
         actions = [
@@ -954,8 +957,6 @@ class MattermostAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Render a Mattermost update Yes/No prompt."""
-        if not self._buttons_enabled():
-            return SendResult(success=False, error="Mattermost callback server not running")
         action_id = secrets.token_urlsafe(16)
         hint = f" (default: {default})" if default else ""
         actions = [
@@ -1005,9 +1006,6 @@ class MattermostAdapter(BasePlatformAdapter):
             except Exception as exc:
                 logger.error("[Mattermost] send_clarify failed: %s", exc, exc_info=True)
                 return SendResult(success=False, error=str(exc))
-
-        if not self._buttons_enabled():
-            return SendResult(success=False, error="Mattermost callback server not running")
 
         action_id = secrets.token_urlsafe(16)
         actions = [
