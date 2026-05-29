@@ -197,47 +197,50 @@ MATTERMOST_HOME_CHANNEL=abc123def456ghi789jkl012mn
 
 Replace the ID with the actual channel ID (click the channel name → View Info → copy the ID).
 
-## Approval Buttons
+## Interactive approval buttons
 
-When Hermes needs to run a dangerous command (e.g. recursive delete, system modification), it normally asks you to type `/approve`, `/approve session`, `/approve always`, or `/deny`. Mattermost clients treat unrecognized slash prefixes as slash commands and may warn or block the message.
+When Hermes needs user input — exec approval, slash-command confirmation, update prompts, or clarify choices — it normally asks you to type a reply. On Mattermost, messages starting with `/` are intercepted as slash commands, so the plain-text `/approve` fallback is **unusable**. Interactive buttons are the only working approval path ([issue #27587](https://github.com/NousResearch/hermes-agent/issues/27587)).
 
-The approval-buttons feature replaces that text prompt with a Mattermost interactive message card containing four buttons — **Allow Once**, **Allow Session**, **Always Allow**, and **Deny** — that you click instead of type.
+The Mattermost plugin serves button-click callbacks on a **plugin-owned HTTP server** (default `127.0.0.1:18065`, route `POST /hermes-callback`). No core webhook configuration is required.
 
-### Enable approval buttons
+### What's supported
 
-Set two values in `~/.hermes/.env`:
+| Surface | Buttons |
+|---------|---------|
+| Exec approval | Allow Once / Allow Session / Always Allow / Deny |
+| Slash confirm | Approve Once / Always Approve / Cancel |
+| Update prompt | Yes / No |
+| Clarify | One button per choice + "Other (type answer)" |
+
+### Configuration
+
+Optional env vars in `~/.hermes/.env`:
 
 ```bash
-# URL Mattermost posts to when a button is clicked.
-# Must be reachable from your Mattermost server.
-MATTERMOST_CALLBACK_URL=http://192.168.30.47:8644/hermes-approval
+# Bind address for the callback server (defaults shown)
+MATTERMOST_CALLBACK_HOST=127.0.0.1
+MATTERMOST_CALLBACK_PORT=18065
 
-# Enable the webhook server (required to receive button clicks).
-WEBHOOK_ENABLED=true
+# External URL embedded in buttons (cross-host setups where Mattermost
+# reaches Hermes at a different address than the bind host)
+# MATTERMOST_CALLBACK_URL=http://192.168.1.50:18065/hermes-callback
 ```
 
-The webhook server listens on port `8644` by default. `MATTERMOST_CALLBACK_URL` must be the address your Mattermost server can POST to — for a LAN deployment this is typically Hermes' LAN IP on the webhook port. For a publicly routed deployment use your HTTPS domain.
+For single-host deployments where Mattermost and Hermes run on the same machine, Mattermost must be allowed to POST to localhost. Add to your Mattermost `config.json`:
 
-### Platform order in config.yaml
-
-The webhook platform must be listed **before** mattermost so the HTTP server is already running when the Mattermost adapter registers its callback route at startup:
-
-```yaml
-platforms:
-  webhook:
-    enabled: true
-  mattermost:
-    enabled: true
-    token: "your-bot-token"
+```json
+"ServiceSettings": {
+  "AllowedUntrustedInternalConnections": "127.0.0.1"
+}
 ```
 
 ### Fallback behavior
 
-If `MATTERMOST_CALLBACK_URL` is not set, or if the webhook server is not running, Hermes automatically falls back to the existing four-choice text prompt — `/approve`, `/approve session`, `/approve always`, `/deny` — without any configuration change. Text-mode approval continues to work on Mattermost desktop clients even when buttons are enabled.
+If the callback server cannot start (port in use, bind failure), each `send_*` method returns failure and the gateway falls back to its existing text prompt unchanged.
 
 ### Security
 
-Button clicks are authorized using `MATTERMOST_ALLOWED_USERS`, the same list that gates normal bot access. Users not in the list receive an ephemeral "not allowed" message and the approval is not granted. A double-click guard prevents the same card from resolving an approval twice.
+Button clicks are gated by `MATTERMOST_ALLOWED_USERS` (same list that gates normal bot access). Set `*` to allow all authorized clickers. A double-click guard prevents the same prompt from resolving twice.
 
 ## Reply Mode
 
