@@ -58,6 +58,38 @@ class TestButtonFormat:
         assert adapter._pop_action("tok1") is None
 
 
+class TestCallbackUrlResolution:
+    """callback_url must resolve like callback_host/port: config.extra → env."""
+
+    def test_from_config_extra(self, monkeypatch):
+        monkeypatch.delenv("MATTERMOST_CALLBACK_URL", raising=False)
+        config = PlatformConfig(
+            enabled=True, token="t",
+            extra={"callback_url": "http://cfg:1/hermes-callback"},
+        )
+        adapter = MattermostAdapter(config)
+        assert adapter._callback_url == "http://cfg:1/hermes-callback"
+
+    def test_env_fallback(self, monkeypatch):
+        monkeypatch.setenv("MATTERMOST_CALLBACK_URL", "http://env:2/hermes-callback")
+        adapter = MattermostAdapter(PlatformConfig(enabled=True, token="t"))
+        assert adapter._callback_url == "http://env:2/hermes-callback"
+
+    def test_config_extra_takes_precedence_over_env(self, monkeypatch):
+        monkeypatch.setenv("MATTERMOST_CALLBACK_URL", "http://env/hermes-callback")
+        config = PlatformConfig(
+            enabled=True, token="t",
+            extra={"callback_url": "http://cfg/hermes-callback"},
+        )
+        adapter = MattermostAdapter(config)
+        assert adapter._callback_url == "http://cfg/hermes-callback"
+
+    def test_unset_is_empty(self, monkeypatch):
+        monkeypatch.delenv("MATTERMOST_CALLBACK_URL", raising=False)
+        adapter = MattermostAdapter(PlatformConfig(enabled=True, token="t"))
+        assert adapter._callback_url == ""
+
+
 class TestFallbackWhenButtonsDisabled:
     @pytest.mark.asyncio
     async def test_send_exec_approval_disabled(self):

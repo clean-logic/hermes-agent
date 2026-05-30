@@ -115,7 +115,11 @@ class MattermostAdapter(BasePlatformAdapter):
             )
         except (TypeError, ValueError):
             self._callback_port = 18065
-        self._callback_url = (os.getenv("MATTERMOST_CALLBACK_URL", "") or "").strip()
+        self._callback_url = (
+            config.extra.get("callback_url")
+            or os.getenv("MATTERMOST_CALLBACK_URL", "")
+            or ""
+        ).strip()
 
         self._runner: Any = None  # aiohttp.web.AppRunner
         # Pending interactive prompts: opaque id -> payload dict.
